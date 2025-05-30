@@ -1,5 +1,8 @@
 ## 프로젝트
 
+- [프로젝트 스펙](docs/spec.md)
+- [프로젝트 아키텍처](docs/architecture.md)
+
 ## Getting Started
 
 ### Prerequisites
@@ -11,3 +14,4 @@
 ```bash
 docker-compose up -d
 ```
+
