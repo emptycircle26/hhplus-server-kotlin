@@ -94,6 +94,19 @@ CREATE TABLE RESERVATION
    reserved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '예약 시각',
    UNIQUE (schedule_id, seat_id)
 ) COMMENT='좌석 예약 정보';
+
+-- 결제 내역 정보
+CREATE TABLE PAYMENT
+(
+   id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '결제 ID',
+   reservation_id  BIGINT      NOT NULL COMMENT '예약 ID',
+   account_id      VARCHAR(64) NOT NULL COMMENT '결제한 유저 ID',
+   amount          INT         NOT NULL COMMENT '결제 금액',
+   status          VARCHAR(32) NOT NULL COMMENT '결제 상태',
+   paid_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '결제 시각',
+   FOREIGN KEY (reservation_id) REFERENCES RESERVATION(id),
+   FOREIGN KEY (account_id) REFERENCES ACCOUNT(id)
+) COMMENT='결제 내역 정보';
 ```
 
 ## 필수 기능 및 API
@@ -107,11 +120,12 @@ CREATE TABLE RESERVATION
     - 날짜와 좌석 정보를 입력받아 임시 배정(약 5분, 정책 자율)
     - 임시 배정 시간 내 결제 미완료 시 배정 해제
     - 임시 배정 중에는 타 유저 예약 불가
-    - 예약 처리 및 결제 내역 생성
-    - 예약 완료 시 좌석 소유권 배정, 대기열 토큰 만료
 4. **잔액 충전/조회 API**
     - 사용자 식별자 및 금액을 받아 잔액 충전
     - 사용자 식별자로 잔액 조회
+5. **결제 API**
+    - 결제 처리 및 결제 내역 생성
+    - 결제 완료 시 좌석 소유권 배정, 대기열 토큰 만료
 
 ## 시퀀스 다이어그램
 
@@ -154,7 +168,7 @@ sequenceDiagram
     end
 ```
 
-### 3. 좌석 예약 요청 API
+### 3. 좌석 예약 요청 API - 기본 흐름 (성공 시나리오)
 
 ```mermaid
 sequenceDiagram
@@ -166,43 +180,67 @@ sequenceDiagram
 
     사용자->>API: 1. 좌석 예약 요청(token, 날짜, 좌석번호)
     API->>Auth: 2. 토큰 유효성 검증
-    Auth-->>API: 3. 토큰 유효(또는 실패)
-    
-    alt 토큰 유효
-        API->>Lock: 4a. 좌석에 대한 락 획득 시도
-        alt 락 획득 성공
-            Lock-->>API: 5a. 락 획득 성공
-            API->>DB: 6a. 예약 가능 여부 확인
-            DB-->>API: 7a. 예약 가능 여부 응답
-            
-            alt 예약 가능
-                API->>DB: 8a-1. 계정 잔액 조회
-                DB-->>API: 9a-1. 계정 잔액 응답
-                
-                alt 잔액 충분
-                    API->>DB: 10a-1-1. 트랜잭션 시작
-                    API->>DB: 11a-1-1. 좌석 임시 배정 저장
-                    API->>DB: 12a-1-1. 잔액 차감
-                    API->>DB: 13a-1-1. 결제 내역 저장
-                    API->>DB: 14a-1-1. 대기열 토큰 만료 처리
-                    API->>DB: 15a-1-1. 트랜잭션 커밋
-                    DB-->>API: 16a-1-1. 커밋 완료
-                    API-->>사용자: 17a-1-1. 예약 및 결제 성공 응답
-                else 잔액 부족
-                    API-->>사용자: 10a-1-2. 에러: 잔액 부족
-                end
-            else 예약 불가
-                API-->>사용자: 8a-2. 에러: 이미 예약된 좌석
-            end
-            
-            API->>Lock: 18a. 락 해제
-        else 락 획득 실패
-            Lock-->>API: 5b. 락 획득 실패
-            API-->>사용자: 6b. 에러: 다른 사용자가 예약 중
-        end
-    else 토큰 무효
-        API-->>사용자: 4b. 에러: 유효하지 않은 토큰
-    end
+    Auth-->>API: 3. 토큰 유효
+    API->>Lock: 4. 좌석에 대한 락 획득 시도
+    Lock-->>API: 5. 락 획득 성공
+    API->>DB: 6. 예약 가능 여부 확인
+    DB-->>API: 7. 예약 가능 응답
+    API->>DB: 8. 임시 예약 저장(5분 타임아웃 설정)
+    DB-->>API: 9. 저장 완료
+    API-->>사용자: 10. 예약 성공 응답
+    API->>Lock: 11. 락 해제
+```
+
+### 3-1. 좌석 예약 요청 API - 실패 시나리오 (토큰 무효)
+
+```mermaid
+sequenceDiagram
+    actor 사용자
+    participant API as API 서버
+    participant Auth as 토큰 검증
+
+    사용자->>API: 1. 좌석 예약 요청(token, 날짜, 좌석번호)
+    API->>Auth: 2. 토큰 유효성 검증
+    Auth-->>API: 3. 토큰 무효
+    API-->>사용자: 4. 에러: 유효하지 않은 토큰
+```
+
+### 3-2. 좌석 예약 요청 API - 실패 시나리오 (락 획득 실패)
+
+```mermaid
+sequenceDiagram
+    actor 사용자
+    participant API as API 서버
+    participant Auth as 토큰 검증
+    participant Lock as 분산 락 관리자
+
+    사용자->>API: 1. 좌석 예약 요청(token, 날짜, 좌석번호)
+    API->>Auth: 2. 토큰 유효성 검증
+    Auth-->>API: 3. 토큰 유효
+    API->>Lock: 4. 좌석에 대한 락 획득 시도
+    Lock-->>API: 5. 락 획득 실패(다른 사용자가 점유 중)
+    API-->>사용자: 6. 에러: 다른 사용자가 예약 중
+```
+
+### 3-3. 좌석 예약 요청 API - 실패 시나리오 (이미 예약된 좌석)
+
+```mermaid
+sequenceDiagram
+    actor 사용자
+    participant API as API 서버
+    participant Auth as 토큰 검증
+    participant Lock as 분산 락 관리자
+    participant DB as 데이터베이스
+
+    사용자->>API: 1. 좌석 예약 요청(token, 날짜, 좌석번호)
+    API->>Auth: 2. 토큰 유효성 검증
+    Auth-->>API: 3. 토큰 유효
+    API->>Lock: 4. 좌석에 대한 락 획득 시도
+    Lock-->>API: 5. 락 획득 성공
+    API->>DB: 6. 예약 가능 여부 확인
+    DB-->>API: 7. 이미 예약된 좌석 응답
+    API-->>사용자: 8. 에러: 이미 예약된 좌석
+    API->>Lock: 9. 락 해제
 ```
 
 ### 4. 잔액 충전/조회 API
@@ -234,6 +272,175 @@ sequenceDiagram
         end
     end
 ```
+
+### 5. 결제 API - 기본 흐름 (성공 시나리오)
+
+```mermaid
+sequenceDiagram
+    actor 사용자
+    participant API as API 서버
+    participant Auth as 토큰 검증
+    participant Lock as 분산 락 관리자
+    participant DB as 데이터베이스
+    participant ExternalPayment as 외부 결제 시스템
+
+    사용자->>API: 1. 결제 요청(token, reservation_id)
+    API->>Auth: 2. 토큰 유효성 검증
+    Auth-->>API: 3. 토큰 유효
+    API->>Lock: 4. 계정에 대한 락 획득 시도
+    Lock-->>API: 5. 락 획득 성공
+    API->>DB: 6. 예약 정보 및 만료 여부 확인
+    DB-->>API: 7. 유효한 예약 정보 응답
+    API->>DB: 8. 계정 잔액 조회
+    DB-->>API: 9. 계정 잔액 응답(충분함)
+    
+    Note over API,ExternalPayment: 결제 처리는 별도 트랜잭션으로 분리
+    API->>ExternalPayment: 10. 외부 결제 요청(필요시)
+    ExternalPayment-->>API: 11. 결제 승인 응답
+    
+    API->>DB: 12. 트랜잭션 시작 - 결제 내역 기록
+    API->>DB: 13. 결제 내역 저장(PENDING 상태)
+    API->>DB: 14. 트랜잭션 커밋
+    DB-->>API: 15. 커밋 완료
+    
+    API->>DB: 16. 트랜잭션 시작 - 상태 업데이트
+    API->>DB: 17. 잔액 차감
+    API->>DB: 18. 결제 상태 COMPLETED로 변경
+    API->>DB: 19. 예약 상태 확정으로 변경
+    API->>DB: 20. 대기열 토큰 만료 처리
+    API->>DB: 21. 트랜잭션 커밋
+    DB-->>API: 22. 커밋 완료
+    
+    API-->>사용자: 23. 결제 성공 응답
+    API->>Lock: 24. 락 해제
+```
+
+### 5-1. 결제 API - 실패 시나리오 (잔액 부족)
+
+```mermaid
+sequenceDiagram
+    actor 사용자
+    participant API as API 서버
+    participant Auth as 토큰 검증
+    participant Lock as 분산 락 관리자
+    participant DB as 데이터베이스
+
+    사용자->>API: 1. 결제 요청(token, reservation_id)
+    API->>Auth: 2. 토큰 유효성 검증
+    Auth-->>API: 3. 토큰 유효
+    API->>Lock: 4. 계정에 대한 락 획득 시도
+    Lock-->>API: 5. 락 획득 성공
+    API->>DB: 6. 예약 정보 및 만료 여부 확인
+    DB-->>API: 7. 유효한 예약 정보 응답
+    API->>DB: 8. 계정 잔액 조회
+    DB-->>API: 9. 계정 잔액 응답(부족함)
+    API-->>사용자: 10. 에러: 잔액 부족
+    API->>Lock: 11. 락 해제
+```
+
+## 분산 락과 임시 배정 관리 전략
+
+### 임시 예약 배정 관리
+
+좌석 예약은 "임시 배정(PENDING)" 상태로 시작하며, 다음과 같은 전략으로 관리됩니다:
+
+1. **TTL(Time-To-Live) 기반 관리**
+   - 임시 예약은 생성 시 만료 시간(기본 5분)을 함께 설정
+   - 만료 시간이 지난 후에도 결제되지 않은 예약은 자동으로 취소됨
+
+2. **주기적 스케줄러 실행**
+   - 별도의 스케줄러가 주기적으로(예: 1분마다) 실행되어 만료된 임시 예약을 확인
+   - 만료된 예약은 자동으로 "만료(EXPIRED)" 상태로 변경되고 좌석은 다시 예약 가능하게 됨
+
+```kotlin
+// 예시: 만료된 예약 처리 스케줄러
+@Scheduled(fixedDelay = 60000) // 1분마다 실행
+fun processExpiredReservations() {
+    val expiredReservations = reservationRepository.findExpiredReservations(Instant.now())
+    
+    expiredReservations.forEach { reservation ->
+        reservation.markExpired()
+        reservationRepository.save(reservation)
+        log.info("Reservation expired: {}", reservation.id)
+    }
+}
+```
+
+3. **조회 시 만료 여부 확인**
+   - 예약 조회 시마다 만료 여부를 검증하는 로직 포함
+   - 사용자가 이미 만료된 예약으로 결제를 시도할 경우 즉시 실패 처리
+
+### 분산 락 관리 전략
+
+대규모 트래픽 환경에서 동시성 이슈를 방지하기 위한 분산 락 전략은 다음과 같습니다:
+
+1. **Redis 기반 분산 락**
+   - Redis의 `SETNX`와 만료 시간을 활용한 분산 락 구현
+   - 재시도 메커니즘과 락 획득 타임아웃 설정으로 안정성 확보
+
+2. **락 세분화**
+   - 좌석별 락: `lock:seat:{scheduleId}:{seatId}`
+   - 계정별 락: `lock:account:{accountId}`
+   - 세분화된 락으로 불필요한 경합 최소화
+
+3. **데드락 방지**
+   - 모든 락에 최대 보유 시간 설정(예: 10초)
+   - 락 획득 시도 최대 횟수 제한(예: 3회)
+
+```kotlin
+// 예시: Redis 기반 분산 락 사용
+fun <T> executeWithLock(lockKey: String, timeoutMs: Long, task: () -> T): T {
+    val lockValue = UUID.randomUUID().toString()
+    val acquired = redisTemplate.opsForValue()
+        .setIfAbsent(lockKey, lockValue, Duration.ofMillis(timeoutMs))
+    
+    if (acquired != true) {
+        throw ConcurrentModificationException("Failed to acquire lock: $lockKey")
+    }
+    
+    return try {
+        task()
+    } finally {
+        // 락 해제: 본인이 설정한 락만 해제하도록 보장
+        redisTemplate.execute(unlockScript, listOf(lockKey), lockValue)
+    }
+}
+```
+
+## 트랜잭션 처리와 결제 로직 전략
+
+### 트랜잭션 분리 전략
+
+결제 로직은 다음과 같이 트랜잭션을 분리하여 관리합니다:
+
+1. **예약 정보 확인 트랜잭션**
+   - 예약 정보 조회 및 상태 확인 (짧은 트랜잭션)
+
+2. **결제 기록 트랜잭션**
+   - 결제 내역을 PENDING 상태로 생성 (짧은 트랜잭션)
+
+3. **외부 결제 시스템 연동**
+   - 외부 API 호출은 트랜잭션 외부에서 처리
+   - 비동기 처리 또는 이벤트 기반 아키텍처 적용 가능
+
+4. **결제 완료 후 상태 업데이트 트랜잭션**
+   - 잔액 차감, 결제 상태 변경, 예약 확정, 토큰 만료 처리 (짧은 트랜잭션)
+
+### 보상 트랜잭션 처리
+
+결제 과정에서 장애 발생 시 데이터 일관성을 유지하기 위한 보상 트랜잭션 전략:
+
+1. **결제 상태 추적**
+   - 모든 결제 단계의 상태 기록
+   - 장애 발생 지점 파악 및 재시도/롤백 대응
+
+2. **멱등성 보장**
+   - 동일 결제 요청의 중복 처리 방지를 위한 요청 ID 활용
+   - 실패한 트랜잭션의 안전한 재시도 지원
+
+3. **결제 이벤트 기록**
+   - 별도의 결제 이벤트 테이블에 모든 결제 관련 이벤트 기록
+   - 장애 상황에서의 데이터 복구 및 감사 지원
 
 ## 인프라 구성도
 ![infra.png](infra.png)
