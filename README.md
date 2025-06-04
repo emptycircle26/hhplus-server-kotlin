@@ -1,4 +1,7 @@
 ## 프로젝트
+- 프로젝트 선정 : 콘서트 예약 시스템.
+- [프로젝트 스펙](docs/spec.md)
+- [프로젝트 아키텍처](docs/architecture.md)
 
 ## Getting Started
 
@@ -11,3 +14,4 @@
 ```bash
 docker-compose up -d
 ```
+
